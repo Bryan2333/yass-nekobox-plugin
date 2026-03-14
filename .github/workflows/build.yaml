@@ -1,0 +1,87 @@
+name: Build and Release Plugin
+
+on:
+  workflow_dispatch:
+    inputs:
+      yass_version:
+        description: 'Yass CLI version to download (e.g. 1.22.1)'
+        required: true
+        default: '1.22.1'
+      plugin_version:
+        description: 'Plugin version (MUST include a hyphen, e.g. 1.22.1-1)'
+        required: true
+        default: '1.22.1-1'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.plugin_version }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: amyu/setup-android@v5
+
+      - name: Download Yass CLI
+        run: |
+          YASS_VER="${{ github.event.inputs.yass_version }}"
+
+          echo "Downloading Yass version $YASS_VER"
+
+          mkdir -p app/libs/arm64-v8a
+
+          wget -O yass_cli.tar.gz "https://github.com/hukeyue/yass/releases/download/${YASS_VER}/yass_cli-android-release-arm64-${YASS_VER}.tgz"
+
+          tar -xvf yass_cli.tar.gz
+
+          cp -i "yass-cli-android-release-arm64-${YASS_VER}/yass_cli" app/libs/arm64-v8a/libyass_cli.so
+
+          chmod +x app/libs/arm64-v8a/libyass_cli.so
+
+          rm -rf yass_cli.tar.gz "yass-cli-android-release-arm64-${YASS_VER}"
+
+      - name: Build Go Wrapper
+        env:
+          GOOS: "android"
+          GOARCH: "arm64"
+          CGO_ENABLED: "0" 
+        run: |
+          go build -ldflags="-s -w" -trimpath -o app/libs/arm64-v8a/libnaive.so main.go
+
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > release.keystore
+
+      - name: Build APK
+        env:
+          APK_VERSION_NAME: "${{ github.event.inputs.plugin_version }}"
+          APK_ABI: "arm64-v8a"
+          KEYSTORE_PASS: "${{ secrets.KEYSTORE_PASS }}"
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
+      - name: Create Release
+        run: |
+          wget -O ghr.tar.gz https://github.com/tcnksm/ghr/releases/download/v0.18.0/ghr_v0.18.0_linux_amd64.tar.gz
+
+          tar -xf ghr.tar.gz
+
+          mv ghr*linux_amd64/ghr .
+
+          mkdir ${{ github.workspace }}/artifacts
+
+          rsync -ahv app/build/outputs/apk/release/*.apk ${{ github.workspace }}/artifacts
+
+          ./ghr -t ${{ secrets.GITHUB_TOKEN }} -u ${{ github.actor }} -r ${{ github.event.repository.name }} -n ${{ github.event.inputs.plugin_version }} ${{ github.event.inputs.plugin_version }} ${{ github.workspace }}/artifacts
